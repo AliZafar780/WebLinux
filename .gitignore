@@ -1,0 +1,62 @@
+# temp / local
+_frames/
+_server*.txt
+__pycache__/
+*.pyc
+
+# OS
+Thumbs.db
+.DS_Store
+
+# editor
+.vscode/
+.idea/
+
+# Windows 2000 (huge/copyrighted - local only)
+images/Windows2000ProfessionalSP3.iso
+images/win2000.img
+win2000_*.png
+
+# Big OS ISOs (local only)
+images/freebsd-bootonly.iso
+images/freebsd-bootonly.iso.xz
+images/haiku*.zip
+images/haiku*.iso
+os_*.png
+qemu_wasm*.png
+win2000_setup.png
+win2000_screen.png
+
+# old engine backups (rollback only)
+v86_old.js
+v86_old.wasm
+v86_old-fallback.wasm
+
+# macOS harness - regenerable big binaries (local only)
+macos-harness/qemu-system-x86_64.wasm
+macos-harness/opencore.img
+macos-harness/*.fd
+macos-harness/bios-256k.bin
+macos-harness/vgabios-stdvga.bin
+macos-harness/kvmvapic.bin
+macos-harness/linuxboot_dma.bin
+macos-harness/xterm.js
+macos-harness/xterm.css
+macos-harness/xterm-pty.mjs
+macos-harness/out.js
+*.log
+stability_log.txt
+
+# junk logs + macOS recovery image (local)
+*.dmg
+harness_test_terminal.txt
+_serve_*.log
+efi_shell_session.log
+harness_terminal.log
+opencore_boot*.log
+stability_log.txt
+macos_boot*.log
+
+# internal strategy docs (NOT public)
+MACOS-ROADMAP.md
+RND_REPORT.md

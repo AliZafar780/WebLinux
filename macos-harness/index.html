@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QEMU-WASM macOS harness</title>
+<link rel="stylesheet" href="xterm.css">
+<style>
+  body { background: #000; color: #c8c8c8; font-family: Consolas, monospace; font-size: 13px; margin: 0; padding: 10px; }
+  #status { position: fixed; top: 0; right: 0; background: #222; padding: 4px 10px; font-size: 12px; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="status">booting...</div>
+<div id="terminal"></div>
+<script src="xterm.js"></script>
+<script type="module">
+// QEMU-WASM macOS harness — ktock-proven pattern (pty + TTY poll override).
+// Usage: ?args=-M,q35,-m,2048M,...  (comma-separated)
+import { openpty } from './xterm-pty.mjs';
+
+const statusEl = document.getElementById('status');
+window.__qemuLog = '';
+const log = (t) => { window.__qemuLog += t + '\n'; statusEl.textContent = t.slice(-80); };
+
+log('crossOriginIsolated: ' + (crossOriginIsolated ? 'yes' : 'NO'));
+
+// ---- pre-fetch all firmware files ----
+const FIRMWARE = ['edk2-x86_64-code.fd', 'edk2-x86_64-vars.fd', 'bios-256k.bin', 'vgabios-stdvga.bin', 'kvmvapic.bin', 'linuxboot_dma.bin'];
+const firmwareBufs = {};
+for (const f of FIRMWARE) {
+  firmwareBufs[f] = await (await fetch(f)).arrayBuffer();
+}
+log('firmware loaded: ' + FIRMWARE.join(', '));
+
+// ---- OpenCore disk image (FAT32, injected into /disk/opencore.img) ----
+const ocImgBuf = await (await fetch('opencore.img')).arrayBuffer();
+log('OpenCore disk image loaded (' + (ocImgBuf.byteLength / 1048576).toFixed(0) + ' MB)');
+
+// ---- optional macOS recovery image (?macos=1) ----
+const params2 = new URLSearchParams(location.search);
+const wantMacOS = params2.get('macos') === '1';
+let macosBuf = null;
+if (wantMacOS) {
+  log('loading macOS recovery (BaseSystem.dmg — 916 MB, takes a moment)...');
+  macosBuf = await (await fetch('BaseSystem.dmg')).arrayBuffer();
+  log('macOS recovery loaded (' + (macosBuf.byteLength / 1048576).toFixed(0) + ' MB)');
+}
+
+// ---- xterm terminal + pty (required: QEMU's stdio chardev polls the pty) ----
+const xterm = new Terminal();
+xterm.open(document.getElementById('terminal'));
+window.__xterm = xterm; // for headless testing
+window.__inject = (s) => { try { xterm.paste(s); } catch (e) { log('inject error: ' + e); } };
+const { master, slave } = openpty();
+xterm.loadAddon(master);
+
+// ---- build the global Module ----
+const params = new URLSearchParams(location.search);
+const argStr = params.get('args');
+const DEFAULT_ARGS = [
+  '-nographic', '-M', 'q35', '-m', '1024M', '-accel', 'tcg',
+  '-L', '/bios/',
+  '-drive', 'if=pflash,format=raw,readonly=on,file=/bios/edk2-x86_64-code.fd',
+  '-drive', 'if=pflash,format=raw,file=/bios/edk2-x86_64-vars.fd',
+  '-drive', 'file=/disk/opencore.img,format=raw,if=ide',
+  '-nic', 'none',
+  '-device', 'isa-applesmc'
+];
+if (wantMacOS) {
+  DEFAULT_ARGS.splice(-2, 0, '-drive', 'file=/disk/BaseSystem.dmg,format=raw,if=ide');
+}
+// args arrive pipe-separated (commas appear inside -accel values)
+globalThis.Module = {
+  arguments: argStr ? argStr.split('|') : DEFAULT_ARGS,
+  locateFile: (p) => new URL(p, import.meta.url).href,
+  mainScriptUrlOrBlob: new URL('./out.js', import.meta.url).href,
+  print: (t) => { statusEl.textContent = 'QEMU: ' + t.slice(-60); },
+  printErr: (t) => { statusEl.textContent = 'QEMU-ERR: ' + t.slice(-60); },
+  pty: slave,
+  preRun: [(mod) => {
+    mod.FS.mkdir('/bios');
+    for (const f of FIRMWARE) {
+      mod.FS.writeFile('/bios/' + f, new Uint8Array(firmwareBufs[f]));
+    }
+    mod.FS.mkdir('/disk');
+    mod.FS.writeFile('/disk/opencore.img', new Uint8Array(ocImgBuf));
+    if (wantMacOS && macosBuf) {
+      mod.FS.writeFile('/disk/BaseSystem.dmg', new Uint8Array(macosBuf));
+    }
+    try {
+      var entries = mod.FS.readdir('/bios');
+      var info = entries.map(function (e) {
+        try { var st = mod.FS.stat('/bios/' + e); return e + ':' + st.size; } catch (x) { return e + ':?'; }
+      });
+      log('FS probe: /bios = ' + info.join(', '));
+      log('FS probe: /disk = ' + mod.FS.readdir('/disk').join(', '));
+    } catch (e) { log('FS probe error: ' + e); }
+  }]
+};
+
+log('starting QEMU: ' + Module.arguments.join(' '));
+const initEmscriptenModule = (await import('./out.js')).default;
+const instance = await initEmscriptenModule(Module);
+
+// ktock's TTY poll override: prevents QEMU from blocking on console input
+var oldPoll = Module['TTY'].stream_ops.poll;
+var pty = Module['pty'];
+Module['TTY'].stream_ops.poll = function (stream, timeout) {
+  if (!pty.readable) {
+    return (pty.readable ? 1 : 0) | (pty.writable ? 4 : 0);
+  }
+  return oldPoll.call(stream, timeout);
+};
+
+log('QEMU running');
+</script>
+</body>
+</html>

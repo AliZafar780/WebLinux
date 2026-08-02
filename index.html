@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="WebLinux — a complete, working Linux system running in your browser via the v86 x86 emulator. No install, no server-side OS, pure WebAssembly.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Ctext%20y='.9em'%20font-size='90'%3E%F0%9F%90%A7%3C/text%3E%3C/svg%3E">
+<title>WebLinux — Linux in your Browser</title>
+<!-- perf: kick off the engine + default image downloads during page parse -->
+<link rel="preload" as="fetch" href="v86.js" crossorigin="anonymous">
+<link rel="preload" as="fetch" href="v86.wasm" crossorigin="anonymous">
+<link rel="preload" as="fetch" href="images/buildroot-bzimage.bin" crossorigin="anonymous">
+<link rel="preload" as="fetch" href="bios/seabios.bin" crossorigin="anonymous">
+<link rel="preload" as="fetch" href="bios/vgabios.bin" crossorigin="anonymous">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel-2: #1a2030;
+    --border: #232b3d;
+    --text: #d7e0f0;
+    --dim: #7c8aa5;
+    --accent: #34d399;
+    --accent-2: #22d3ee;
+    --danger: #f87171;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(1200px 600px at 50% -10%, #16203a 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: "Cascadia Mono", Consolas, "SF Mono", Menlo, monospace;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    padding: 12px 18px;
+    background: rgba(19, 23, 34, 0.85);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(6px);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+  }
+  .brand { display: flex; align-items: baseline; gap: 8px; margin-right: auto; }
+  .brand .logo { font-size: 22px; line-height: 1; filter: drop-shadow(0 0 8px rgba(52,211,153,.6)); }
+  .brand h1 { font-size: 18px; font-weight: 700; letter-spacing: .5px; }
+  .brand h1 span { color: var(--accent); }
+  .brand .tag { color: var(--dim); font-size: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+  select, button {
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 12px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  select:hover, button:hover { border-color: var(--accent); }
+  select:focus-visible, button:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+  button.primary { background: #0c3b2e; border-color: #14532d; color: #a7f3d0; }
+  button.primary:hover { background: #11563f; }
+  button.danger:hover { border-color: var(--danger); color: var(--danger); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  select { min-width: 200px; }
+
+  /* ---------- status bar ---------- */
+  #statusbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 7px 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+  }
+  #status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: 0 0 auto; }
+  #status-dot.ok { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #status-dot.err { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+  #status-text { color: var(--dim); flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #progress-wrap { width: 220px; height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; flex: 0 0 auto; display: none; }
+  #progress-wrap.show { display: block; }
+  #progress { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .2s; }
+
+  /* ---------- main ---------- */
+  main {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 18px;
+  }
+  #screen-wrap {
+    position: relative;
+    width: min(960px, 94vw);
+    aspect-ratio: 4 / 3;
+    background: #000;
+    border-radius: 10px;
+    border: 1px solid #000;
+    box-shadow: 0 0 0 1px var(--border), 0 0 60px rgba(52, 211, 153, 0.08), 0 24px 60px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  #screen_container { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #screen_container canvas { width: 100% !important; height: 100% !important; image-rendering: pixelated; }
+
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px;
+    background: #05070c;
+    z-index: 5;
+    transition: opacity .4s;
+    text-align: center; padding: 20px;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 44px; height: 44px;
+    border: 3px solid #1c2740;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #overlay h2 { font-size: 16px; color: var(--accent); letter-spacing: .5px; }
+  #overlay p { color: var(--dim); font-size: 12.5px; max-width: 520px; line-height: 1.6; }
+
+  /* key buttons */
+  #keys {
+    display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+    max-width: 960px;
+  }
+  #keys button { font-size: 12px; padding: 6px 11px; }
+  #keys kbd { font-size: 11px; color: var(--accent-2); }
+
+  /* ---------- footer ---------- */
+  footer {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+    padding: 10px 18px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 12px; color: var(--dim);
+  }
+  footer a { color: var(--accent-2); text-decoration: none; }
+  footer a:hover { text-decoration: underline; }
+  #distro-info { flex: 1 1 auto; min-width: 260px; }
+  #distro-info b { color: var(--text); }
+
+  /* ---------- help modal ---------- */
+  #modal {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(5, 7, 12, .72);
+    backdrop-filter: blur(4px);
+    display: none; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  #modal.open { display: flex; }
+  .modal-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    max-width: 680px; width: 100%;
+    max-height: 86vh; overflow-y: auto;
+    padding: 22px 26px;
+    box-shadow: 0 30px 80px rgba(0,0,0,.7);
+  }
+  .modal-box h2 { font-size: 17px; margin-bottom: 14px; color: var(--accent); }
+  .modal-box h3 { font-size: 13.5px; margin: 16px 0 8px; color: var(--accent-2); }
+  .modal-box p, .modal-box li { font-size: 12.5px; line-height: 1.7; color: var(--dim); }
+  .modal-box ul { padding-left: 20px; }
+  .modal-box table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin: 8px 0; }
+  .modal-box td, .modal-box th { border: 1px solid var(--border); padding: 7px 10px; text-align: left; color: var(--dim); }
+  .modal-box th { color: var(--text); background: var(--panel-2); }
+  .modal-close {
+    margin-top: 18px; width: 100%;
+    padding: 9px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+  }
+  .modal-close:hover { border-color: var(--accent); }
+
+  #error-box {
+    display: none;
+    background: #2a1518;
+    border: 1px solid #7f1d1d;
+    color: #fecaca;
+    padding: 14px 18px;
+    border-radius: 8px;
+    font-size: 13px;
+    max-width: 640px;
+    line-height: 1.6;
+  }
+
+  @media (max-width: 720px) {
+    #progress-wrap { width: 120px; }
+    .brand .tag { display: none; }
+    select { min-width: 0; flex: 1 1 auto; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="logo">&#x1F427;</span>
+    <h1>Web<span>Linux</span></h1>
+    <span class="tag">complete x86 Linux in your browser &mdash; no install, no cloud</span>
+  </div>
+  <div class="controls">
+    <select id="distro" title="Choose a Linux distribution"></select>
+    <select id="net-mode" title="Guest networking:
+Internet (relay) — virtual NE2000 NIC bridged to the internet via the public v86 relay (wss://relay.widgetry.org). Run 'udhcpc' inside the guest to get an IP.
+Local proxy — use your own WebSocket proxy on 127.0.0.1:8080 (e.g. v86 wsproxy).
+Off — no virtual NIC.">
+      <option value="relay" selected>&#x1F310; Internet (relay)</option>
+      <option value="local">&#x1F310; Local proxy</option>
+      <option value="off">&#x1F310; Off</option>
+    </select>
+    <button id="btn-boot" class="primary" title="Boot the selected distribution">&#x25B6;&nbsp; Boot</button>
+    <button id="btn-pause" title="Pause / resume the emulator">&#x23F8;&nbsp; Pause</button>
+    <button id="btn-restart" title="Reset the machine">&#x21BB;&nbsp; Restart</button>
+    <button id="btn-power" class="danger" title="Power off">&#x23FB;&nbsp; Power</button>
+    <button id="btn-save" title="Download the machine state as a file">&#x1F4BE;&nbsp; Save state</button>
+    <button id="btn-load" title="Restore a previously saved state">&#x1F4C2;&nbsp; Load state</button>
+    <button id="btn-fs" title="Go fullscreen">&#x26F6;&nbsp; Fullscreen</button>
+    <button id="btn-help" title="Help &amp; shortcuts">?&nbsp; Help</button>
+    <input type="file" id="state-file" accept=".bin" hidden>
+  </div>
+</header>
+
+<div id="statusbar">
+  <span id="status-dot"></span>
+  <span id="status-text">Initializing&hellip;</span>
+  <div id="progress-wrap"><div id="progress"></div></div>
+</div>
+
+<main>
+  <div id="screen-wrap">
+    <div id="screen_container" tabindex="0"></div>
+    <div id="overlay">
+      <div class="spinner"></div>
+      <h2 id="overlay-title">Booting Linux&hellip;</h2>
+      <p id="overlay-sub">The x86 CPU, BIOS, disk and VGA are emulated in WebAssembly &mdash; 100% client-side. First run downloads the image; afterwards everything runs locally.</p>
+    </div>
+  </div>
+
+  <div id="keys">
+    <button data-keys="ctrlaltdel" title="Ctrl+Alt+Del — restart the guest OS">Ctrl+Alt+Del</button>
+    <button data-keys="esc" title="Escape">Esc</button>
+    <button data-keys="tab" title="Tab">Tab</button>
+    <button data-keys="ctrlc" title="Interrupt current command">Ctrl+C</button>
+    <button data-keys="ctrlz" title="Suspend current job">Ctrl+Z</button>
+    <button data-keys="ctrll" title="Clear terminal">Ctrl+L</button>
+    <button data-keys="altf4" title="Close current window (X11)">Alt+F4</button>
+  </div>
+
+  <div id="error-box"></div>
+</main>
+
+<footer>
+  <span id="distro-info"><b>Buildroot Linux</b> &mdash; minimal BusyBox system</span>
+  <span id="net-info" title="Packets seen on the virtual NE2000 NIC (guest&#8596;proxy)">&#x1F310; net: idle</span>
+  <span id="audio-info" title="v86 sound emulation (PC speaker + DAC)">&#x1F50A; audio: on</span>
+  <span>Emulator: <a href="https://github.com/copy/v86" target="_blank" rel="noopener">v86</a> by Fabian Hemmer (copy.sh) &middot; Images: <a href="https://copy.sh/v86/" target="_blank" rel="noopener">copy.sh</a></span>
+</footer>
+
+<div id="modal" role="dialog" aria-modal="true">
+  <div class="modal-box">
+    <h2>&#x1F427; WebLinux &mdash; help &amp; shortcuts</h2>
+
+    <h3>What is this?</h3>
+    <p>A complete x86 PC (CPU, BIOS, RAM, disk, VGA) emulated in JavaScript/WebAssembly by the open-source <b>v86</b> emulator. The Linux distributions below are real, bootable images running entirely inside your browser tab. Nothing is streamed after the initial image download; no server runs your OS.</p>
+
+    <h3>Keyboard</h3>
+    <table>
+      <tr><th>Action</th><th>Shortcut / control</th></tr>
+      <tr><td>Type into the machine</td><td>Click the screen, then just type</td></tr>
+      <tr><td>Ctrl+Alt+Del (guest reboot)</td><td><b>Ctrl+Alt+Insert</b> or the button above the screen</td></tr>
+      <tr><td>Interrupt a command</td><td><kbd>Ctrl+C</kbd> button (or click screen and press Ctrl+C)</td></tr>
+      <tr><td>Fullscreen</td><td>Fullscreen button above (Esc leaves)</td></tr>
+      <tr><td>Pause / resume</td><td>Pause button</td></tr>
+    </table>
+    <p><i>Note: browsers reserve Ctrl+Alt+Delete for the OS, so the guest combo is sent as Ctrl+Alt+Insert.</i></p>
+
+    <h3>Distributions</h3>
+    <table>
+      <tr><th>Distro</th><th>Boot media</th><th>UI</th><th>Login</th></tr>
+      <tr><td>Buildroot Linux</td><td>bzImage (5 MB)</td><td>Console (BusyBox)</td><td>root / (none)</td></tr>
+      <tr><td>Buildroot Linux 6.8</td><td>bzImage (10 MB)</td><td>Console (BusyBox)</td><td>root / (none)</td></tr>
+      <tr><td>TinyCore 11</td><td>ISO (19 MB)</td><td>Console</td><td>root / (none)</td></tr>
+      <tr><td>Damn Small Linux</td><td>ISO (50 MB)</td><td><b>Graphical desktop (JWM + Firefox 2)</b></td><td>root / (none)</td></tr>
+      <tr><td>NodeOS</td><td>bzImage (14 MB)</td><td>Node.js REPL as the OS shell</td><td>none</td></tr>
+    </table>
+
+    <h3>Things to try</h3>
+    <ul>
+      <li><code>uname -a</code> &mdash; see the (emulated) kernel</li>
+      <li><code>cat /etc/issue</code>, <code>busybox --list</code></li>
+      <li><code>dmesg | head</code> &mdash; real kernel boot messages</li>
+      <li><b>Networking</b> (select &#x1F310; Internet above, then in the guest):
+        <code>udhcpc</code> &rarr; <code>ping -c 3 1.1.1.1</code> &rarr; <code>wget -O - http://example.com</code>
+        &mdash; the virtual NE2000 NIC is bridged to the internet via the public v86 relay</li>
+      <li>DSL: boot the graphical desktop, open Firefox</li>
+      <li>Save state &rarr; close the tab &rarr; Load state &rarr; the machine is exactly where you left it</li>
+    </ul>
+
+    <h3>Privacy</h3>
+    <p>Everything runs in your browser. The distro images are served from this same page (or copied to your disk). No keystrokes or data leave your machine.</p>
+
+    <button class="modal-close" id="modal-close">Close</button>
+  </div>
+</div>
+
+<script src="v86.js"></script>
+<script>
+'use strict';
+
+/* ============================ DISTRO REGISTRY ============================ */
+var DISTROS = [
+  {
+    id: 'buildroot', name: 'Buildroot Linux', ui: 'Console',
+    type: 'bzimage', file: 'images/buildroot-bzimage.bin', size: 5166352, ram: 128,
+    cmdline: 'tsc=reliable mitigations=off random.trust_cpu=on audit=0 nowatchdog nmi_watchdog=0 loglevel=0',
+    login: 'Login: root (no password)',
+    tips: 'Try: uname -a, busybox --list, cat /etc/issue, dmesg | head'
+  },
+  {
+    id: 'buildroot68', name: 'Buildroot Linux 6.8', ui: 'Console',
+    type: 'bzimage', file: 'images/buildroot-bzimage68.bin', size: 10068480, ram: 128,
+    cmdline: 'tsc=reliable mitigations=off random.trust_cpu=on audit=0 nowatchdog nmi_watchdog=0 loglevel=0',
+    login: 'Login: root (no password)',
+    tips: 'Try: uname -r, dmesg | tail, ls /proc'
+  },
+  {
+    id: 'tinycore', name: 'TinyCore 11', ui: 'Console',
+    type: 'hda', file: 'images/TinyCore-11.0.iso', size: 19922944, ram: 256,
+    login: 'Login: root (no password)',
+    tips: 'Tiny Core Linux. Try: ls /, cat /etc/tinycorelinux, tce-load -wi Xvesa (needs network)'
+  },
+  {
+    id: 'dsl', name: 'Damn Small Linux', ui: 'GUI',
+    type: 'cdrom', file: 'images/dsl-4.11.rc2.iso', size: 52824064, ram: 256,
+    login: 'Boots straight to the graphical desktop',
+    tips: 'JWM desktop + Firefox 2.0 + XMMS. Click the screen to use the mouse.'
+  },
+  {
+    id: 'nodeos', name: 'NodeOS', ui: 'Node REPL',
+    type: 'bzimage', file: 'images/nodeos-kernel.bin', size: 14452000, ram: 128,
+    cmdline: 'tsc=reliable mitigations=off random.trust_cpu=on',
+    noQuiet: true, // NodeOS runs Node.js as init: bare flags become Node args and crash it
+    login: 'No login — boots into a Node.js REPL',
+    tips: 'Type JS: console.log("hi from Linux"), process.platform, os.uptime()'
+  },
+  {
+    id: 'win2000', name: 'Windows 2000', ui: 'Installer → Desktop',
+    type: 'win', file: 'images/Windows2000ProfessionalSP3.iso', size: 390282240, ram: 128,
+    hda: 'images/win2000.img', hdaSize: 1073741824,
+    localOnly: true, // ISO (372 MB) is not pushed to GitHub — local run only
+    login: 'First boot: install from the CD (needs ~700 MB free on the 1 GB disk)',
+    tips: 'Win2000 SP3. Press a key to boot the setup CD. After install, the HDD boots automatically. NE2000 NIC driver is built in.'
+  },
+  {
+    id: 'kolibri', name: 'KolibriOS', ui: 'GUI',
+    type: 'cdrom', file: 'images/kolibri.iso', size: 102262784, ram: 256,
+    login: 'Boots straight to the desktop in seconds',
+    tips: 'A tiny GUI OS written in assembly (97 MB). Click the screen to use the mouse.'
+  },
+  {
+    id: 'freebsd', name: 'FreeBSD 14.4', ui: 'Console',
+    type: 'cdrom', file: 'images/freebsd-bootonly.iso', size: 584202240, ram: 256,
+    localOnly: true, // ISO (557 MB) is not pushed to GitHub — local run only
+    login: 'Boots to the FreeBSD installer',
+    tips: "macOS's ancestor — real BSD. Boots the installer from the CD."
+  },
+  {
+    id: 'haiku', name: 'Haiku (nightly)', ui: 'GUI',
+    type: 'cdrom', file: 'images/haiku-master-hrev59921-x86_gcc2h-anyboot.iso', size: 690814976, ram: 256,
+    localOnly: true, // ISO (659 MB) is not pushed to GitHub — local run only
+    login: 'Boots to the BeOS-style desktop',
+    tips: 'Mac-like OS (BeOS descendant). Boots to a full graphical desktop.'
+  }
+];
+
+/* ============================ DOM HELPERS ============================ */
+function $(id) { return document.getElementById(id); }
+
+var statusDot = $('status-dot'), statusText = $('status-text'),
+    progressWrap = $('progress-wrap'), progressBar = $('progress'),
+    overlay = $('overlay'), overlayTitle = $('overlay-title'), overlaySub = $('overlay-sub'),
+    distroSelect = $('distro'), distroInfo = $('distro-info'), errorBox = $('error-box');
+
+function setStatus(text, state) {
+  statusText.textContent = text;
+  statusDot.className = state || 'ok';
+}
+function setProgress(pct, show) {
+  if (show || pct > 0 && pct < 100) progressWrap.classList.add('show');
+  else progressWrap.classList.remove('show');
+  progressBar.style.width = (pct || 0) + '%';
+}
+function showError(msg) {
+  errorBox.style.display = 'block';
+  errorBox.innerHTML = '<b>Cannot start the emulator</b><br>' + msg;
+}
+function hideError() { errorBox.style.display = 'none'; }
+
+function fillDistroSelect() {
+  DISTROS.forEach(function (d, i) {
+    var opt = document.createElement('option');
+    opt.value = d.id;
+    opt.textContent = d.name + '  (' + d.ui + ')' + (d.localOnly ? '  [local]' : '');
+    distroSelect.appendChild(opt);
+  });
+  var saved = null;
+  try { saved = localStorage.getItem('weblinux-distro'); } catch (e) {}
+  if (saved && DISTROS.some(function (d) { return d.id === saved; })) distroSelect.value = saved;
+}
+function currentDistro() {
+  return DISTROS.filter(function (d) { return d.id === distroSelect.value; })[0] || DISTROS[0];
+}
+function updateDistroInfo(d) {
+  distroInfo.innerHTML = '<b>' + d.name + '</b> &mdash; ' + d.login + ' &middot; <span style="color:#7c8aa5">' + d.tips + '</span>';
+}
+
+/* ============================ EMULATOR LIFECYCLE ============================ */
+var emulator = null;
+var currentId = null;
+
+function destroyEmulator() {
+  if (emulator) {
+    if (emulator._netTimer) { clearInterval(emulator._netTimer); emulator._netTimer = null; }
+    try { emulator.destroy(); } catch (e) {}
+    emulator = null;
+  }
+}
+
+function createEmulator(d) {
+  destroyEmulator();
+  hideError();
+
+  // Local-only systems (Win2000/FreeBSD/Haiku ISOs are too big for GitHub):
+  // check the image actually exists before booting, so the public demo
+  // shows a friendly message instead of a broken 404 boot.
+  if (d.localOnly) {
+    fetch(d.file, { method: 'HEAD' }).then(function (r) {
+      if (r.ok) startEmulator(d);
+      else showError('<b>' + d.name + ' is local-only</b> — its image (' +
+        (d.size / 1048576).toFixed(0) + ' MB) is too large to host on GitHub Pages.<br>' +
+        'Run it on your own machine:<br>' +
+        '<code>python serve.py</code> &rarr; open <code>http://127.0.0.1:8001</code> &rarr; pick ' + d.name + '.<br>' +
+        'The image files live in <code>images/</code> and are git-ignored.');
+    }).catch(function () {
+      showError('<b>' + d.name + ' is local-only</b> — image unavailable (offline or missing).<br>Run <code>python serve.py</code> locally to use it.');
+    });
+    return;
+  }
+  startEmulator(d);
+}
+
+function startEmulator(d) {
+  currentId = d.id;
+  try { localStorage.setItem('weblinux-distro', d.id); } catch (e) {}
+
+  setStatus('Starting ' + d.name + ' — downloading engine + image…', 'ok');
+  setProgress(0, true);
+  overlay.classList.remove('hidden');
+  overlayTitle.textContent = 'Booting ' + d.name + '…';
+  overlaySub.textContent = 'Loading the emulator engine and ' + d.name + ' image (' +
+    (d.size / 1048576).toFixed(1) + ' MB). Everything runs locally in WebAssembly.';
+
+  if (typeof V86 === 'undefined') {
+    showError('The emulator core (v86.js) failed to load. Make sure you are serving this page over HTTP (e.g. python serve.py), not from file://');
+    setStatus('Emulator core missing', 'err');
+    return;
+  }
+  if (typeof WebAssembly === 'undefined') {
+    showError('Your browser does not support WebAssembly, which the emulator requires.');
+    setStatus('WebAssembly unavailable', 'err');
+    return;
+  }
+
+  var img = { url: d.file, size: d.size, async: false };
+  var dbgSerial = /[?&]serial=1/.test(location.search); // hidden debug: capture kernel serial console
+  var netMode = ($('net-mode') && $('net-mode').value) || 'relay';
+  var cfg = {
+    wasm_path: 'v86.wasm',                 // WASM CPU engine (SIMD)
+    screen_container: $('screen_container'),
+    autostart: true,
+    memory_size: (d.ram || 256) * 1048576,
+    vga_memory_size: 8 * 1048576,
+    bios: { url: 'bios/seabios.bin' },
+    vga_bios: { url: 'bios/vgabios.bin' },
+    // ---- performance (upgraded v86 release build) ----
+    fastboot: true,                        // skip SeaBIOS POST memory test (warm-reboot flag)
+    use_graphical_text: true               // render text mode to canvas instead of DOM
+  };
+  // guest networking: virtual NIC bridged to the internet
+  if (netMode === 'relay') cfg.network_relay_url = 'wss://relay.widgetry.org/';
+  else if (netMode === 'local') cfg.network_relay_url = 'ws://127.0.0.1:8080/';
+  if (dbgSerial) {
+    cfg.uart1 = { enabled: true }; // COM1 for serial console capture
+    if (d.type === 'bzimage') cfg.cmdline = 'console=tty0 console=ttyS0 ' + (d.cmdline || '');
+  }
+  if (d.type === 'bzimage') {
+    cfg.bzimage = img;
+    // 'quiet' + speed flags = fewer kernel messages => far less rendering => faster boot
+    if (!d.noQuiet) cfg.cmdline = ((cfg.cmdline || d.cmdline || '') + ' quiet').trim();
+  }
+  else if (d.type === 'hda') { cfg.hda = { url: d.file, size: d.size, async: true }; }
+  else if (d.type === 'cdrom') { cfg.cdrom = { url: d.file, size: d.size, async: true }; }
+  else if (d.type === 'win') {
+    // Windows 2000: boot installer from CD-ROM, install onto a hard disk.
+    // The HDD is async so setup writes persist back to the server (serve.py PUT support).
+    cfg.cdrom = { url: d.file, size: d.size, async: true };
+    cfg.hda = { url: d.hda, size: d.hdaSize, async: true };
+    // boot from CD first; empty HDD falls through to the CD loader anyway
+    cfg.boot_order = 0x213;
+  }
+
+  emulator = new V86(cfg);
+  window.__emu = emulator; // debug handle (also used by automated tests)
+
+  // hidden debug: capture kernel serial output (use ?serial=1)
+  if (dbgSerial) {
+    window.__serial = '';
+    emulator.bus.register('serial0-output-byte', function (byte) {
+      window.__serial += String.fromCharCode(byte);
+      if (window.__serial.length > 200000) window.__serial = window.__serial.slice(-100000);
+    });
+  }
+  wireEvents(d);
+  $('btn-pause').textContent = '\u23F8  Pause';
+}
+
+function wireEvents(d) {
+  // upgraded v86 release build: all machine events fire on emulator.bus
+  var bus = emulator.bus;
+  var ready = false;
+
+  function onProgress(e) {
+    if (!e || !e.total) return;
+    var pct = Math.min(100, Math.round((e.loaded / e.total) * 100));
+    setProgress(pct, true);
+    setStatus('Loading ' + d.name + ' … ' + pct + '%', 'ok');
+  }
+  bus.register('download-progress', onProgress);
+
+  bus.register('download-error', function (e) {
+    setStatus('Download failed — check the console', 'err');
+  });
+
+  bus.register('emulator-ready', function () {
+    ready = true;
+    setProgress(0, false);
+    overlay.classList.add('hidden');
+    setStatus('Running ' + d.name + ' — click the screen and type', 'ok');
+  });
+
+  bus.register('emulator-started', function () {
+    $('btn-pause').textContent = '\u23F8  Pause';
+  });
+  bus.register('emulator-stopped', function () {
+    $('btn-pause').textContent = '\u25B6  Resume';
+  });
+
+  // watchdog: if nothing happened within 90s, tell the user instead of spinning forever
+  setTimeout(function () {
+    if (!ready && emulator) {
+      setStatus('Still starting ' + d.name + ' — first boot can be slow. If this persists, hit Restart.', 'warn');
+    }
+  }, 90000);
+
+  // --- guest networking activity (NIC <-> WebSocket proxy) ---
+  var netTx = 0, netRx = 0, netLast = 0;
+  function netModeNow() { return ($('net-mode') && $('net-mode').value) || 'relay'; }
+  function paintNet() {
+    var el = $('net-info');
+    if (!el) return;
+    var mode = netModeNow();
+    if (Date.now() - netLast > 2500 && netTx + netRx === 0) {
+      el.textContent = '\uD83C\uDF10 net: idle' + (mode === 'off' ? ' (off)' : '');
+      return;
+    }
+    netLast = Date.now();
+    el.textContent = '\uD83C\uDF10 net: \u25B2' + netTx + ' \u25BC' + netRx + (mode === 'off' ? ' (off)' : '');
+  }
+  var netTimer = setInterval(function () { paintNet(); paintAudio(); }, 1500);
+  emulator.add_listener('net0-send', function () { netTx++; paintNet(); });
+  bus.register('net0-receive', function () { netRx++; paintNet(); });
+  // stop the timer when the machine is replaced
+  emulator._netTimer = netTimer;
+
+  // --- audio status (v86 release build: speaker_adapter + audio_context) ---
+  function paintAudio() {
+    var audioEl = $('audio-info');
+    if (!audioEl || !emulator) return;
+    var spk = emulator.speaker_adapter;
+    if (spk && spk.audio_context) {
+      var state = spk.audio_context.state;
+      audioEl.textContent = '\uD83D\uDD0A audio: on' + (state === 'suspended' ? ' (click screen to unmute)' : (state ? ' (' + state + ')' : ''));
+    } else {
+      audioEl.textContent = '\uD83D\uDD07 audio: off';
+    }
+  }
+  paintAudio();
+}
+
+// resume the emulated sound card's AudioContext on first interaction
+// (browsers require a user gesture before audio can start)
+document.getElementById('screen_container').addEventListener('click', function () {
+  if (emulator && emulator.speaker_adapter && emulator.speaker_adapter.audio_context &&
+      emulator.speaker_adapter.audio_context.state === 'suspended') {
+    try { emulator.speaker_adapter.audio_context.resume(); } catch (e) {}
+  }
+});
+
+/* ============================ CONTROLS ============================ */
+function sendKeys(codes) {
+  if (!emulator) return;
+  codes.forEach(function (c) { emulator.bus.send('keyboard-code', c); });
+}
+var KEYMAP = {
+  ctrlaltdel: [29, 56, 83, 157, 184, 211],      // Ctrl+Alt+Del
+  esc:        [1, 129],
+  tab:        [15, 143],
+  ctrlc:      [29, 46, 174, 157],               // Ctrl+C
+  ctrlz:      [29, 44, 172, 157],               // Ctrl+Z
+  ctrll:      [29, 38, 166, 157],               // Ctrl+L
+  altf4:      [56, 62, 190, 184]                // Alt+F4
+};
+
+document.addEventListener('click', function (e) {
+  var btn = e.target.closest ? e.target.closest('button[data-keys]') : null;
+  if (btn) sendKeys(KEYMAP[btn.dataset.keys] || []);
+});
+
+window.addEventListener('keydown', function (e) {
+  if (!emulator) return;
+  // Ctrl+Alt+Insert -> Ctrl+Alt+Del (browsers reserve Ctrl+Alt+Del on Windows)
+  if (e.ctrlKey && e.altKey && e.key === 'Insert') {
+    e.preventDefault();
+    sendKeys(KEYMAP.ctrlaltdel);
+    setStatus('Sent Ctrl+Alt+Del to the guest', 'ok');
+    return;
+  }
+  // warn instead of closing the tab while Ctrl is held
+  window.onbeforeunload = e.ctrlKey ? function () { return 'Keyboard input is being sent to the emulator.'; } : null;
+});
+
+$('btn-boot').addEventListener('click', function () {
+  if (emulator && currentId === currentDistro().id && emulator.is_running()) {
+    setStatus('Already running — restart to reboot', 'ok');
+    return;
+  }
+  createEmulator(currentDistro());
+});
+$('btn-restart').addEventListener('click', function () {
+  createEmulator(currentDistro());
+  setStatus('Restarting ' + currentDistro().name + ' …', 'ok');
+});
+$('btn-power').addEventListener('click', function () {
+  destroyEmulator();
+  overlay.classList.remove('hidden');
+  overlayTitle.textContent = 'Powered off';
+  overlaySub.textContent = 'Press Boot to start again.';
+  setStatus('Powered off', 'ok');
+});
+$('btn-pause').addEventListener('click', function () {
+  if (!emulator) return;
+  if (emulator.is_running()) { emulator.stop(); setStatus('Paused'); }
+  else { emulator.start(); setStatus('Resumed', 'ok'); }
+});
+
+$('btn-fs').addEventListener('click', function () {
+  var el = $('screen-wrap');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (el.requestFullscreen) el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+});
+
+/* ---- save / load state ---- */
+$('btn-save').addEventListener('click', async function () {
+  if (!emulator) return;
+  setStatus('Saving machine state…', 'ok');
+  try {
+    var buf = await emulator.save_state();
+    var blob = new Blob([buf], { type: 'application/octet-stream' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'weblinux-state-' + currentId + '.bin';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    setStatus('State saved — use Load state to resume later', 'ok');
+  } catch (err) {
+    setStatus('Save failed: ' + err, 'err');
+  }
+});
+$('btn-load').addEventListener('click', function () { $('state-file').click(); });
+$('state-file').addEventListener('change', async function (ev) {
+  var file = ev.target.files && ev.target.files[0];
+  ev.target.value = '';
+  if (!file) return;
+  if (!emulator) createEmulator(currentDistro());
+  setStatus('Restoring state…', 'ok');
+  try {
+    var buf = await file.arrayBuffer();
+    var wasRunning = emulator.is_running();
+    if (wasRunning) emulator.stop();
+    await emulator.restore_state(buf);
+    if (wasRunning) emulator.start();
+    setStatus('State restored (' + (file.size / 1048576).toFixed(1) + ' MB)', 'ok');
+  } catch (err) {
+    setStatus('State restore failed: ' + err, 'err');
+  }
+});
+
+/* ---- help ---- */
+$('btn-help').addEventListener('click', function () { $('modal').classList.add('open'); });
+$('modal-close').addEventListener('click', function () { $('modal').classList.remove('open'); });
+$('modal').addEventListener('click', function (e) { if (e.target === this) this.classList.remove('open'); });
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && $('modal').classList.contains('open')) $('modal').classList.remove('open');
+});
+
+/* ---- distro switch ---- */
+distroSelect.addEventListener('change', function () {
+  var d = currentDistro();
+  updateDistroInfo(d);
+  createEmulator(d);
+});
+
+/* ============================ INIT ============================ */
+fillDistroSelect();
+updateDistroInfo(currentDistro());
+createEmulator(currentDistro());
+</script>
+</body>
+</html>
